@@ -50,7 +50,8 @@ int main(int args, char **argv)
 /***************************************************************/
 /* Start of Dictionary 	                                       */
 
-#define MAX_WORD_SIZE 17 /* Includes the NULL character */
+#define MAX_WORD_SIZE     17 /* Includes the NULL character */
+#define NUMBER_OF_LETTERS 32
 
 typedef struct
 {
@@ -62,13 +63,32 @@ typedef struct
 struct _Dictionary
 {
 	int   length;
+	char  translationMap[NUMBER_OF_LETTERS];
+	int   letterUseCount[NUMBER_OF_LETTERS];
 	Word  words[1];
 };
+#define LETTER_TO_INDEX(c) ((c) - 'a')
 
-void Dictionary_MakePattern(const char *word, char *pattern);
-void Dictionary_AddWord(Dictionary *this, const char *word);
-int Dictionary_MatchLetters(const char *word, const char *partialWord);
-char *Dictionary_DecryptWord(Dictionary *this, const char *encryptedWord, const char *resolvedLetters, int *key);
+typedef struct _Sentence
+{
+	int length;
+	struct
+	{
+		char *pSourceText;  /* NOTE: This ain't a NULL-terminated string */
+		int   length;
+		char  text[MAX_WORD_SIZE];
+		int   key;
+	} words[40];
+} Sentence;
+
+void  Dictionary_MakePattern(const char *word, char *pattern);
+void  Dictionary_AddWord(Dictionary *this, const char *word);
+int   Dictionary_MatchLetters(const char *word, const char *partialWord);
+char *Dictionary_DecryptWord(Dictionary *this, const char *encryptedWord, int *key);
+void  Dictionary_MakeSentence(char *encryptedSentence, Sentence *sentence);
+void  Dictionary_GetResolvedLetters(Dictionary *this, const char *encryptedWord, char *resolvedLetters);
+void  Dictionary_AddWordLetters(Dictionary *this, const char *encryptedWord, const char *decodedWord);
+void  Dictionary_RemoveWordLetters(Dictionary *this, const char *encryptedWord);
 
 /*
 	Dictionary_Create() - Creates a Dictionary and initializes it.
@@ -110,37 +130,17 @@ Dictionary *Dictionary_Destroy(Dictionary *this)
 }
 
 /*
-	Dictionary_ResolveSentence() - Resolves an encrypted sentence.
-	NOTE: encryptedSentence argument is both input and output.
+	Dictionary_MakeSentece() - Creates a new sentence data type, which is
+	 the an encrypted sentece word tokens sorted by length in descending 
+	 order.
 */
-typedef struct 
-{
-	int   length;
-	Word  words[40];  /* Ideally I should allocate this dynamically */
-} Sentence;
-
-void Dictionary_ResolveSentence(Dictionary *this, char *encryptedSentence)
+void Dictionary_MakeSentence(char *encryptedSentence, Sentence *sentence)
 {
 	char *tokenString;
 	char *currentToken;
-	char *decryptedWord;
 	int   index;
-	int   key;
-	int   resolved = FALSE;
-	static struct _Sentence
-	{
-		int length;
-		struct
-		{
-			char *pSourceText;  /* This ain't a NULL-terminated string */
-			int   length;
-			char  text[MAX_WORD_SIZE];
-			char  resolvedLetters[MAX_WORD_SIZE];
-			int   key;
-		} words[40];
-	} sentence;
-	
-	memset(&sentence, 0, sizeof(sentence));
+
+	memset(sentence, 0, sizeof(Sentence));
 
 	tokenString = (char *)malloc(strlen(encryptedSentence) + 1);
 	strcpy(tokenString, encryptedSentence);
@@ -153,13 +153,13 @@ void Dictionary_ResolveSentence(Dictionary *this, char *encryptedSentence)
 		index = 0;
 
 		/* Calculate the index where this new token should be inserted */
-		if (sentence.length > 0)
+		if (sentence->length > 0)
 		{
 			/* NOTE: Is it worth it to implement a binary search for the 40
 			         elements array? */
-			for ( ; index < sentence.length; index++ )
+			for ( ; index < sentence->length; index++ )
 			{
-				if (strlen(currentToken) >= sentence.words[index].length)
+				if (strlen(currentToken) >= sentence->words[index].length)
 				{
 					break;
 				}
@@ -167,56 +167,52 @@ void Dictionary_ResolveSentence(Dictionary *this, char *encryptedSentence)
 		}
 
 		/* If there are entries that need to be moved... do so */
-		if (index < sentence.length)
+		if (index < sentence->length)
 		{
-			memmove(&sentence.words[index + 1], &sentence.words[index], (sentence.length - index) * sizeof(sentence.words[0]) );
+			memmove(&sentence->words[index + 1], &sentence->words[index], (sentence->length - index) * sizeof(sentence->words[0]) );
 		}
 
 		/* Keep a pointer to original string as well */
-		sentence.words[index].pSourceText = encryptedSentence + (currentToken - tokenString);
+		sentence->words[index].pSourceText = encryptedSentence + (currentToken - tokenString);
 		if( currentToken[strlen(currentToken) - 1] == '\n' )
 		{
 			currentToken[strlen(currentToken) - 1] = '\0';
 		}
-		strcpy(sentence.words[index].text, currentToken);
-		sentence.words[index].length = strlen(currentToken);
+		strcpy(sentence->words[index].text, currentToken);
+		sentence->words[index].length = strlen(currentToken);
 
-		sentence.length++;
+		sentence->length++;
 
 		/* Next token */
 		currentToken = strtok(NULL, " ");
 	}
 
-	index = 0;
+	free(tokenString);
+
+	return;
+}
+
+/*
+	Dictionary_ResolveSentence() - Resolves an encrypted sentence.
+	NOTE: encryptedSentence argument is both input and output.
+*/
+void Dictionary_ResolveSentence(Dictionary *this, char *encryptedSentence)
+{
+	int   index = 0;
+	char *decryptedWord;
+	int   resolved = FALSE;
+	Sentence sentence;
+	
+	Dictionary_MakeSentence(encryptedSentence, &sentence);
+
 	while(TRUE)
 	{
-		decryptedWord = Dictionary_DecryptWord(this, sentence.words[index].text, sentence.words[index].resolvedLetters, &sentence.words[index].key);
+		decryptedWord = Dictionary_DecryptWord(this, sentence.words[index].text, &sentence.words[index].key);
 
-		if (decryptedWord)
+		if(decryptedWord != NULL)
 		{
-			int i = 0;
-			int letter, tLetter;
 			strcpy(sentence.words[index].text, decryptedWord);
-			for(i = index + 1; i < sentence.length; i++)
-			{
-				for(letter = 0; sentence.words[index].text[letter] != '\0'; letter++)
-				{
-					for(tLetter = 0; sentence.words[i].text[tLetter] != '\0'; tLetter++)
-					{
-						if(sentence.words[index].pSourceText[letter] == sentence.words[i].pSourceText[tLetter])
-						{
-							if(sentence.words[i].resolvedLetters[0] == '\0')
-							{
-								memset(sentence.words[i].resolvedLetters, ' ', sentence.words[i].length);
-							}
-							sentence.words[i].resolvedLetters[tLetter] = sentence.words[index].text[letter];
-						}	
-					}
-				}
-			}
-
-			index++;
-			if (index == sentence.length)
+			if (++index == sentence.length)
 			{
 				resolved = TRUE;
 				break;
@@ -224,13 +220,12 @@ void Dictionary_ResolveSentence(Dictionary *this, char *encryptedSentence)
 		}
 		else
 		{
-			/* We need to back up if needed or exit if already in the first word*/
-			if (index != 0)
+			if(index != 0)
 			{
-				memcpy(sentence.words[index].text, sentence.words[index].pSourceText, sentence.words[index].length);
-				sentence.words[index].resolvedLetters[0] = '\0';
+				sentence.words[index].key = 0;
 				index--;
-				continue;
+				memcpy(sentence.words[index].text, sentence.words[index].pSourceText, sentence.words[index].length);
+				Dictionary_RemoveWordLetters(this, sentence.words[index].text);
 			}
 			else
 			{
@@ -256,7 +251,9 @@ void Dictionary_ResolveSentence(Dictionary *this, char *encryptedSentence)
 		}
 	}
 
-	free(tokenString);
+	memset(this->translationMap, 0, sizeof(this->translationMap));
+	memset(this->letterUseCount, 0, sizeof(this->letterUseCount));
+		
 	return;
 }
 
@@ -266,31 +263,102 @@ void Dictionary_ResolveSentence(Dictionary *this, char *encryptedSentence)
 	NOTE: As dictionary grows this function will have a poor performance,
 		  for big dictionaries a hash map will probably work best.
 */
-char *Dictionary_DecryptWord(Dictionary *this, const char *encryptedWord, const char *resolvedLetters, int *key)
+char *Dictionary_DecryptWord(Dictionary *this, const char *encryptedWord, int *key)
 {
+	int   i;
 	char *word = NULL;
 	char  wordPattern[MAX_WORD_SIZE];
-	int   i;
+	char  resolvedLetters[MAX_WORD_SIZE];
+	
 	int   nSolution = 0;
-
-	Dictionary_MakePattern(encryptedWord, wordPattern);
 
 	for(i = 0; i < this->length; i++)
 	{
-		/* If lenght is the same with same pattern with same letters as the
-		 resolved letters and it is the key we're looking for... we got a hit! */
-		if( (strlen(encryptedWord) == this->words[i].length) &&
-			(!strcmp(wordPattern, this->words[i].pattern))   &&
-		    (Dictionary_MatchLetters(this->words[i].text, resolvedLetters)) &&
-		    (++nSolution > *key) )
+		/* First we need to check if the length of encrypted word is the same
+		   as the dictionary one. */
+		if (strlen(encryptedWord) == this->words[i].length)
 		{
-			word = this->words[i].text;
-			(*key)++;
-			break;
+			/* Generate the repetition pattern and the already resolved letters
+			   string */
+			Dictionary_MakePattern(encryptedWord, wordPattern);
+			Dictionary_GetResolvedLetters(this, encryptedWord, resolvedLetters);
+
+			/* If the repetion pattern, the resolved letters and the key matches */
+			if ( 
+				 (!strcmp(wordPattern, this->words[i].pattern)) && 
+				 (Dictionary_MatchLetters(this->words[i].text, resolvedLetters)) &&
+				 (++nSolution > *key)
+			   )
+			{
+				word = this->words[i].text;
+				(*key)++;
+				Dictionary_AddWordLetters(this, encryptedWord, word);
+				break;
+			}
 		}
 	}
 
 	return word;
+}
+
+/*
+	Dictionary_AddWordLetters() - Given a coded and decoded word, it will add the 
+	  appropriate data to the dictionarie's tranlation map.
+*/
+void Dictionary_AddWordLetters(Dictionary *this, const char *encryptedWord, const char *decodedWord)
+{
+	int cIdx = 0;
+
+	for (cIdx = 0; encryptedWord[cIdx] != '\0'; cIdx++)
+	{
+		this->translationMap[LETTER_TO_INDEX(encryptedWord[cIdx])] = decodedWord[cIdx];
+		this->letterUseCount[LETTER_TO_INDEX(encryptedWord[cIdx])]++;
+	}
+
+	return;
+}
+
+/*
+	Dictionary_RemoveWordLetters() - It will remove the refences from the translation
+	  map for a given encrypted word.
+*/
+void Dictionary_RemoveWordLetters(Dictionary *this, const char *encryptedWord)
+{
+	const char *pLetter;
+
+	for(pLetter = encryptedWord; *pLetter != '\0'; pLetter++)
+	{
+		if(--this->letterUseCount[LETTER_TO_INDEX(*pLetter)] == 0)
+		{
+			this->translationMap[LETTER_TO_INDEX(*pLetter)] = '\0';
+		}
+	}
+	return;
+}
+
+/*
+	Dictionary_GetResolvedLetters() - It will return in "resolvedLetters" those
+	  letters that are already mapped to a decoded character. A NULL string mean
+	  none of the letters is decoded.
+*/
+void Dictionary_GetResolvedLetters(Dictionary *this, const char *encryptedWord, char *resolvedLetters)
+{
+	int cIdx;
+
+	/* Clear output string first */
+	memset(resolvedLetters, 0, MAX_WORD_SIZE);
+
+	for (cIdx = 0; encryptedWord[cIdx] != '\0'; cIdx++)
+	{
+		if(this->translationMap[LETTER_TO_INDEX(encryptedWord[cIdx])] != '\0')
+		{
+			if(resolvedLetters[0] == '\0')
+			{
+				memset(resolvedLetters, ' ', strlen(encryptedWord));
+			}
+			resolvedLetters[cIdx] = this->translationMap[LETTER_TO_INDEX(encryptedWord[cIdx])];
+		}
+	}
 }
 
 /*
